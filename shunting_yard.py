@@ -87,6 +87,23 @@ def inicio_ultimo_atomo(tokens):
     raise ErrorRegex("cuantificador sin operando válido")
 
 
+def quitar_parentesis_externos(tokens):
+    """Elimina únicamente paréntesis que envuelven al átomo completo."""
+    tokens = list(tokens)
+    while len(tokens) >= 2 and tokens[0] == "(" and tokens[-1] == ")":
+        nivel = 0
+        envuelven_todo = True
+        for i, token in enumerate(tokens):
+            nivel += (token == "(") - (token == ")")
+            if nivel == 0 and i < len(tokens) - 1:
+                envuelven_todo = False
+                break
+        if not envuelven_todo:
+            break
+        tokens = tokens[1:-1]
+    return tokens
+
+
 def expandir(tokens):
     """Reemplaza R+ por RR* y R? por (R|ε)."""
     resultado = []
@@ -103,9 +120,14 @@ def expandir(tokens):
         if token == "+":
             reemplazo = ["(", *atomo, ")", "(", *atomo, ")", "*"]
         else:
-            reemplazo = ["(", *atomo, "|", "ε", ")"]
+            base = quitar_parentesis_externos(atomo)
+            # (R?)? = R?: evita producir expresiones como ((R|ε)|ε).
+            if len(base) >= 2 and base[-2:] == ["|", "ε"]:
+                reemplazo = ["(", *base, ")"]
+            else:
+                reemplazo = ["(", *atomo, "|", "ε", ")"]
         resultado.extend(reemplazo)
-        cambios.append(f"{mostrar(atomo)} {token}  →  {mostrar(reemplazo)}")
+        cambios.append(f"{''.join(atomo)}{token} → {''.join(reemplazo)}")
 
     return resultado, cambios
 
@@ -131,7 +153,7 @@ def shunting_yard(tokens):
                 raise ErrorRegex(f"falta un operador antes de '{token}'")
             salida.append(token)
             espera_operando = False
-            accion = "a salida"
+            accion = "salida"
 
         elif token == "(":
             if not espera_operando:
@@ -151,14 +173,14 @@ def shunting_yard(tokens):
             pila.pop()
             accion = "cerrar grupo"
             if movidos:
-                accion += f"; mover {mostrar(movidos)}"
+                accion += f", mover {mostrar(movidos)}"
             espera_operando = False
 
         elif token == "*":
             if espera_operando:
                 raise ErrorRegex("'*' sin operando")
             salida.append(token)
-            accion = "postfix a salida"
+            accion = "postfix"
 
         elif token in BINARIOS:
             if espera_operando:
@@ -172,14 +194,14 @@ def shunting_yard(tokens):
                 movidos.append(pila.pop())
                 salida.append(movidos[-1])
             pila.append(token)
-            accion = f"apilar {token}"
+            accion = "apilar"
             if movidos:
-                accion = f"mover {mostrar(movidos)}; {accion}"
+                accion = f"mover {mostrar(movidos)}, apilar"
             espera_operando = True
 
         pasos.append(
-            f"{numero:02}. {token} → {accion} | salida: {mostrar(salida)} "
-            f"| pila: {mostrar(pila)}"
+            f"{numero:02}. {token} → {accion}; salida=[{mostrar(salida)}]; "
+            f"pila=[{mostrar(pila)}]"
         )
 
     if espera_operando:
@@ -192,7 +214,7 @@ def shunting_yard(tokens):
         movidos.append(pila.pop())
         salida.append(movidos[-1])
     if movidos:
-        pasos.append(f"FIN → mover {mostrar(movidos)} | salida: {mostrar(salida)}")
+        pasos.append(f"FIN → mover {mostrar(movidos)}; salida=[{mostrar(salida)}]")
     return salida, pasos
 
 
@@ -211,19 +233,15 @@ def crear_reporte(lineas):
         if not regex.strip():
             continue
         try:
-            normalizada, postfix, cambios, pasos = convertir(regex)
-            bloque = [
-                "=" * 72,
-                f"LÍNEA {numero}: {regex}",
-                f"POSTFIX: {mostrar(postfix)}",
-                f"NORMALIZADA: {mostrar(normalizada)}",
-            ]
+            _, postfix, cambios, pasos = convertir(regex)
+            bloque = [f"LÍNEA {numero}: {regex}"]
             if cambios:
                 bloque += ["EXTENSIONES:", *[f"  {c}" for c in cambios]]
             bloque += ["PASOS:", *[f"  {paso}" for paso in pasos]]
+            bloque.append(f"POSTFIX: {mostrar(postfix)}")
         except ErrorRegex as error:
             hubo_error = True
-            bloque = ["=" * 72, f"LÍNEA {numero}: {regex}", f"ERROR: {error}"]
+            bloque = [f"LÍNEA {numero}: {regex}", f"ERROR: {error}"]
         bloques.append("\n".join(bloque))
 
     if not bloques:
@@ -236,7 +254,6 @@ def imprimir(reporte, pausa=0):
         print(reporte)
         return
 
-    print("Enter para continuar; escriba q y Enter para salir.\n")
     lineas = reporte.splitlines()
     for i in range(0, len(lineas), pausa):
         print("\n".join(lineas[i : i + pausa]))
