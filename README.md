@@ -101,4 +101,7 @@ POSTFIX: a t | c ·
 Los resultados no están codificados de forma fija: el programa abre el archivo
 indicado en la línea de comandos y procesa dinámicamente cada línea no vacía.
 
+## Link al video
+
+https://youtu.be/G0R_zyYNLys
 
