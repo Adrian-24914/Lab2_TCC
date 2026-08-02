@@ -26,3 +26,8 @@ PDF están incluidos en `expresiones.txt`.
 
 La solución también reconoce delimitadores escapados, por lo que `\(` y `\)` se
 tratan como caracteres literales y no modifican la pila.
+
+
+## Link al video 
+
+https://youtu.be/G0R_zyYNLys
