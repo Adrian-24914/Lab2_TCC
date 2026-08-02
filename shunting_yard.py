@@ -375,10 +375,16 @@ def main() -> int:
         default=Path(__file__).with_name("expresiones.txt"),
         help="archivo de entrada (por defecto: expresiones.txt)",
     )
-    parser.add_argument(
+    modos_pausa = parser.add_mutually_exclusive_group()
+    modos_pausa.add_argument(
         "--pausar",
         action="store_true",
         help="pausa el reporte cada 20 líneas para facilitar la demostración",
+    )
+    modos_pausa.add_argument(
+        "--paso-a-paso",
+        action="store_true",
+        help="pausa después de cada línea del reporte",
     )
     argumentos = parser.parse_args()
 
@@ -390,7 +396,9 @@ def main() -> int:
         parser.error(f"no se pudo leer el archivo: {error}")
 
     reporte, hubo_error = procesar_lineas(lineas)
-    imprimir_reporte(reporte, argumentos.pausar)
+    pausar = argumentos.pausar or argumentos.paso_a_paso
+    lineas_por_pagina = 1 if argumentos.paso_a_paso else 20
+    imprimir_reporte(reporte, pausar, lineas_por_pagina)
     return 1 if hubo_error else 0
 
 
