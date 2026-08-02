@@ -1,405 +1,276 @@
-"""Conversión de expresiones regulares infix a postfix con Shunting Yard."""
-
-from __future__ import annotations
+"""Convierte expresiones regulares infix a postfix con Shunting Yard."""
 
 import argparse
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 
-CONCATENACION = "·"
-OPERADORES_BINARIOS = {"|", CONCATENACION}
-PRECEDENCIA = {"|": 1, CONCATENACION: 2}
-SIMBOLOS_CONTROL = {"(", ")", "|", "*", "+", "?", CONCATENACION}
+CONCAT = "·"
+BINARIOS = {"|", CONCAT}
+PRECEDENCIA = {"|": 1, CONCAT: 2}
+CONTROL = {"(", ")", "|", "*", "+", "?", CONCAT}
 
 
-class ErrorExpresion(ValueError):
-    """Indica que una expresión regular no se puede convertir."""
+class ErrorRegex(ValueError):
+    pass
 
 
-@dataclass(frozen=True)
-class ResultadoConversion:
-    original: str
-    normalizada: str
-    postfix: str
-    pasos_tokenizacion: tuple[str, ...]
-    pasos_extension: tuple[str, ...]
-    pasos_shunting_yard: tuple[str, ...]
-
-
-def _formatear(tokens: Iterable[str]) -> str:
+def mostrar(tokens):
     return " ".join(tokens) if tokens else "∅"
 
 
-def tokenizar(expresion: str) -> tuple[list[str], list[str]]:
-    """Separa la expresión y conserva cada carácter escapado como un operando."""
-    tokens: list[str] = []
-    pasos: list[str] = []
-    indice = 0
+def es_operando(token):
+    return token not in CONTROL
 
-    while indice < len(expresion):
-        simbolo = expresion[indice]
 
-        if simbolo.isspace():
-            indice += 1
-            continue
+def tokenizar(regex):
+    """Agrupa escapes y clases de caracteres en tokens individuales."""
+    tokens = []
+    i = 0
 
-        if simbolo == "\\":
-            if indice + 1 >= len(expresion):
-                raise ErrorExpresion(
-                    f"barra invertida sin carácter escapado en la posición {indice + 1}"
-                )
-            token = expresion[indice : indice + 2]
-            tokens.append(token)
-            pasos.append(
-                f"Posición {indice + 1}: se reconoce '{token}' como un solo "
-                "operando escapado."
-            )
-            indice += 2
-            continue
-
-        if simbolo == "[":
-            inicio = indice
-            indice += 1
+    while i < len(regex):
+        caracter = regex[i]
+        if caracter.isspace():
+            i += 1
+        elif caracter == "\\":
+            if i + 1 == len(regex):
+                raise ErrorRegex("barra invertida sin carácter escapado")
+            tokens.append(regex[i : i + 2])
+            i += 2
+        elif caracter == "[":
+            inicio = i
+            i += 1
             escapado = False
-            while indice < len(expresion):
-                actual = expresion[indice]
+            while i < len(regex):
                 if escapado:
                     escapado = False
-                elif actual == "\\":
+                elif regex[i] == "\\":
                     escapado = True
-                elif actual == "]":
+                elif regex[i] == "]":
                     break
-                indice += 1
-
-            if indice >= len(expresion) or expresion[indice] != "]":
-                raise ErrorExpresion(
-                    f"clase de caracteres sin ']' desde la posición {inicio + 1}"
-                )
-
-            token = expresion[inicio : indice + 1]
-            tokens.append(token)
-            pasos.append(
-                f"Posiciones {inicio + 1}-{indice + 1}: '{token}' es un solo operando."
-            )
-            indice += 1
-            continue
-
-        if simbolo == CONCATENACION:
-            raise ErrorExpresion(
-                f"el símbolo reservado '{CONCATENACION}' aparece en la posición "
-                f"{indice + 1}"
-            )
-
-        tokens.append(simbolo)
-        indice += 1
+                i += 1
+            if i == len(regex):
+                raise ErrorRegex("clase de caracteres sin cierre ']'")
+            tokens.append(regex[inicio : i + 1])
+            i += 1
+        else:
+            if caracter == CONCAT:
+                raise ErrorRegex(f"'{CONCAT}' es un símbolo interno reservado")
+            tokens.append(caracter)
+            i += 1
 
     if not tokens:
-        raise ErrorExpresion("la expresión está vacía")
-
-    return tokens, pasos
-
-
-def _es_operando(token: str) -> bool:
-    return token not in SIMBOLOS_CONTROL
+        raise ErrorRegex("expresión vacía")
+    return tokens
 
 
-def _inicio_ultimo_atomo(tokens: list[str]) -> int:
-    if not tokens:
-        raise ErrorExpresion("un cuantificador no tiene operando a su izquierda")
+def inicio_ultimo_atomo(tokens):
+    """Localiza el operando al que pertenece un cuantificador postfix."""
+    i = len(tokens) - 1
+    while i >= 0 and tokens[i] == "*":
+        i -= 1
+    if i < 0:
+        raise ErrorRegex("cuantificador sin operando")
 
-    indice = len(tokens) - 1
-    while indice >= 0 and tokens[indice] == "*":
-        indice -= 1
-
-    if indice < 0:
-        raise ErrorExpresion("un cuantificador no tiene operando a su izquierda")
-
-    if tokens[indice] == ")":
+    if tokens[i] == ")":
         nivel = 1
-        indice -= 1
-        while indice >= 0:
-            if tokens[indice] == ")":
-                nivel += 1
-            elif tokens[indice] == "(":
-                nivel -= 1
-                if nivel == 0:
-                    return indice
-            indice -= 1
-        raise ErrorExpresion("paréntesis de cierre sin apertura")
+        i -= 1
+        while i >= 0:
+            nivel += (tokens[i] == ")") - (tokens[i] == "(")
+            if nivel == 0:
+                return i
+            i -= 1
+        raise ErrorRegex("paréntesis de cierre sin apertura")
 
-    if _es_operando(tokens[indice]):
-        return indice
-
-    raise ErrorExpresion(
-        "un cuantificador no tiene un operando válido a su izquierda"
-    )
+    if es_operando(tokens[i]):
+        return i
+    raise ErrorRegex("cuantificador sin operando válido")
 
 
-def expandir_extensiones(tokens: list[str]) -> tuple[list[str], list[str]]:
-    """Convierte R+ a RR* y R? a (R|ε), incluso cuando R es un grupo."""
-    resultado: list[str] = []
-    pasos: list[str] = []
+def expandir(tokens):
+    """Reemplaza R+ por RR* y R? por (R|ε)."""
+    resultado = []
+    cambios = []
 
     for token in tokens:
         if token not in {"+", "?"}:
             resultado.append(token)
             continue
 
-        inicio = _inicio_ultimo_atomo(resultado)
+        inicio = inicio_ultimo_atomo(resultado)
         atomo = resultado[inicio:]
         del resultado[inicio:]
-        antes = _formatear(atomo)
-
         if token == "+":
             reemplazo = ["(", *atomo, ")", "(", *atomo, ")", "*"]
-            regla = "R+ → RR*"
         else:
             reemplazo = ["(", *atomo, "|", "ε", ")"]
-            regla = "R? → (R|ε)"
-
         resultado.extend(reemplazo)
-        pasos.append(f"Se aplica {regla} a [{antes}]: {_formatear(resultado)}")
+        cambios.append(f"{mostrar(atomo)} {token}  →  {mostrar(reemplazo)}")
 
-    if not pasos:
-        pasos.append("La expresión no contiene extensiones '+' ni '?'.")
-
-    return resultado, pasos
+    return resultado, cambios
 
 
-def _puede_terminar_atomo(token: str) -> bool:
-    return _es_operando(token) or token in {")", "*"}
-
-
-def _puede_iniciar_atomo(token: str) -> bool:
-    return _es_operando(token) or token == "("
-
-
-def insertar_concatenaciones(tokens: list[str]) -> list[str]:
-    """Agrega el operador interno · donde la concatenación era implícita."""
-    resultado: list[str] = []
+def agregar_concatenacion(tokens):
+    resultado = []
     for token in tokens:
-        if (
-            resultado
-            and _puede_terminar_atomo(resultado[-1])
-            and _puede_iniciar_atomo(token)
-        ):
-            resultado.append(CONCATENACION)
+        termina = resultado and (es_operando(resultado[-1]) or resultado[-1] in ")*")
+        inicia = es_operando(token) or token == "("
+        if termina and inicia:
+            resultado.append(CONCAT)
         resultado.append(token)
     return resultado
 
 
-def convertir_postfix(tokens: list[str]) -> tuple[list[str], list[str]]:
-    """Ejecuta Shunting Yard sobre una expresión ya normalizada."""
-    salida: list[str] = []
-    pila: list[str] = []
-    pasos: list[str] = []
+def shunting_yard(tokens):
+    salida, pila, pasos = [], [], []
     espera_operando = True
 
-    def registrar(numero: int, token: str, accion: str) -> None:
-        pasos.append(
-            f"{numero:02}. Token '{token}': {accion} | "
-            f"salida=[{_formatear(salida)}] | pila=[{_formatear(pila)}]"
-        )
-
-    for numero, token in enumerate(tokens, start=1):
-        if _es_operando(token):
+    for numero, token in enumerate(tokens, 1):
+        if es_operando(token):
             if not espera_operando:
-                raise ErrorExpresion(f"falta un operador antes de '{token}'")
+                raise ErrorRegex(f"falta un operador antes de '{token}'")
             salida.append(token)
             espera_operando = False
-            registrar(numero, token, "se envía a la salida")
-            continue
+            accion = "a salida"
 
-        if token == "(":
+        elif token == "(":
             if not espera_operando:
-                raise ErrorExpresion("falta concatenación antes de '('")
+                raise ErrorRegex("falta concatenación antes de '('")
             pila.append(token)
-            registrar(numero, token, "se apila")
-            continue
+            accion = "apilar"
 
-        if token == ")":
+        elif token == ")":
             if espera_operando:
-                raise ErrorExpresion(
-                    "paréntesis vacío o cierre después de un operador"
-                )
+                raise ErrorRegex("paréntesis vacío o cierre inválido")
+            movidos = []
             while pila and pila[-1] != "(":
-                salida.append(pila.pop())
+                movidos.append(pila.pop())
+                salida.append(movidos[-1])
             if not pila:
-                raise ErrorExpresion("paréntesis ')' sin apertura")
+                raise ErrorRegex("paréntesis ')' sin apertura")
             pila.pop()
+            accion = "cerrar grupo"
+            if movidos:
+                accion += f"; mover {mostrar(movidos)}"
             espera_operando = False
-            registrar(numero, token, "se desapila hasta encontrar '('")
-            continue
 
-        if token == "*":
+        elif token == "*":
             if espera_operando:
-                raise ErrorExpresion("el operador '*' no tiene operando")
+                raise ErrorRegex("'*' sin operando")
             salida.append(token)
-            registrar(numero, token, "operador postfix; se envía a la salida")
-            continue
+            accion = "postfix a salida"
 
-        if token in OPERADORES_BINARIOS:
+        elif token in BINARIOS:
             if espera_operando:
-                raise ErrorExpresion(
-                    f"el operador '{token}' no tiene operando izquierdo"
-                )
-            movidos: list[str] = []
+                raise ErrorRegex(f"'{token}' sin operando izquierdo")
+            movidos = []
             while (
                 pila
-                and pila[-1] in OPERADORES_BINARIOS
+                and pila[-1] in BINARIOS
                 and PRECEDENCIA[pila[-1]] >= PRECEDENCIA[token]
             ):
-                movido = pila.pop()
-                salida.append(movido)
-                movidos.append(movido)
+                movidos.append(pila.pop())
+                salida.append(movidos[-1])
             pila.append(token)
-            espera_operando = True
-            accion = "se apila"
+            accion = f"apilar {token}"
             if movidos:
-                accion = f"se pasan {_formatear(movidos)} a salida y se apila"
-            registrar(numero, token, accion)
-            continue
+                accion = f"mover {mostrar(movidos)}; {accion}"
+            espera_operando = True
 
-        raise ErrorExpresion(f"token no reconocido: '{token}'")
+        pasos.append(
+            f"{numero:02}. {token} → {accion} | salida: {mostrar(salida)} "
+            f"| pila: {mostrar(pila)}"
+        )
 
     if espera_operando:
-        raise ErrorExpresion("la expresión termina con un operador incompleto")
+        raise ErrorRegex("la expresión termina con un operador")
 
+    movidos = []
     while pila:
-        operador = pila.pop()
-        if operador == "(":
-            raise ErrorExpresion("paréntesis '(' sin cierre")
-        salida.append(operador)
-
-    pasos.append(
-        f"Fin: se vacía la pila | salida=[{_formatear(salida)}] | pila=[∅]"
-    )
+        if pila[-1] == "(":
+            raise ErrorRegex("paréntesis '(' sin cierre")
+        movidos.append(pila.pop())
+        salida.append(movidos[-1])
+    if movidos:
+        pasos.append(f"FIN → mover {mostrar(movidos)} | salida: {mostrar(salida)}")
     return salida, pasos
 
 
-def convertir_expresion(expresion: str) -> ResultadoConversion:
-    tokens, pasos_tokenizacion = tokenizar(expresion)
-    expandidos, pasos_extension = expandir_extensiones(tokens)
-    normalizados = insertar_concatenaciones(expandidos)
-    postfix, pasos_shunting_yard = convertir_postfix(normalizados)
-
-    return ResultadoConversion(
-        original=expresion,
-        normalizada=_formatear(normalizados),
-        postfix=_formatear(postfix),
-        pasos_tokenizacion=tuple(pasos_tokenizacion),
-        pasos_extension=tuple(pasos_extension),
-        pasos_shunting_yard=tuple(pasos_shunting_yard),
-    )
+def convertir(regex):
+    tokens, cambios = expandir(tokenizar(regex))
+    normalizada = agregar_concatenacion(tokens)
+    postfix, pasos = shunting_yard(normalizada)
+    return normalizada, postfix, cambios, pasos
 
 
-def procesar_lineas(lineas: Iterable[str]) -> tuple[str, bool]:
-    bloques: list[str] = []
+def crear_reporte(lineas):
+    bloques = []
     hubo_error = False
-    expresiones = 0
 
-    for numero_linea, linea in enumerate(lineas, start=1):
-        expresion = linea.rstrip("\r\n")
-        if not expresion.strip():
+    for numero, regex in enumerate(lineas, 1):
+        if not regex.strip():
             continue
-        expresiones += 1
-
-        encabezado = ["=" * 88, f"Línea {numero_linea}: {expresion}"]
         try:
-            resultado = convertir_expresion(expresion)
-        except ErrorExpresion as error:
+            normalizada, postfix, cambios, pasos = convertir(regex)
+            bloque = [
+                "=" * 72,
+                f"LÍNEA {numero}: {regex}",
+                f"POSTFIX: {mostrar(postfix)}",
+                f"NORMALIZADA: {mostrar(normalizada)}",
+            ]
+            if cambios:
+                bloque += ["EXTENSIONES:", *[f"  {c}" for c in cambios]]
+            bloque += ["PASOS:", *[f"  {paso}" for paso in pasos]]
+        except ErrorRegex as error:
             hubo_error = True
-            bloques.append("\n".join([*encabezado, f"ERROR: {error}"]))
-            continue
-
-        tokenizacion = resultado.pasos_tokenizacion or (
-            "No hay caracteres escapados ni clases que agrupar.",
-        )
-        bloque = [
-            *encabezado,
-            "\n1) Verificación de tokens:",
-            *[f"   {paso}" for paso in tokenizacion],
-            "\n2) Conversión de extensiones:",
-            *[f"   {paso}" for paso in resultado.pasos_extension],
-            f"\n3) Infix normalizada: {resultado.normalizada}",
-            "   ('·' representa concatenación; '.' conserva el comodín del regex)",
-            "\n4) Pasos de Shunting Yard:",
-            *[f"   {paso}" for paso in resultado.pasos_shunting_yard],
-            f"\nPOSTFIX: {resultado.postfix}",
-        ]
+            bloque = ["=" * 72, f"LÍNEA {numero}: {regex}", f"ERROR: {error}"]
         bloques.append("\n".join(bloque))
 
-    if expresiones == 0:
-        return "El archivo no contiene expresiones para procesar.", True
+    if not bloques:
+        return "El archivo no contiene expresiones.", True
     return "\n".join(bloques), hubo_error
 
 
-def imprimir_reporte(reporte: str, pausar: bool, lineas_por_pagina: int = 20) -> None:
-    """Imprime el reporte completo o lo pagina para una demostración en pantalla."""
-    if not pausar:
+def imprimir(reporte, pausa=0):
+    if not pausa:
         print(reporte)
         return
 
+    print("Enter para continuar; escriba q y Enter para salir.\n")
     lineas = reporte.splitlines()
-    for inicio in range(0, len(lineas), lineas_por_pagina):
-        print("\n".join(lineas[inicio : inicio + lineas_por_pagina]))
-        if inicio + lineas_por_pagina >= len(lineas):
-            break
-
-        try:
-            respuesta = input(
-                "\n--- Enter para continuar; escriba q y Enter para salir --- "
-            )
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if respuesta.strip().lower() == "q":
-            break
+    for i in range(0, len(lineas), pausa):
+        print("\n".join(lineas[i : i + pausa]))
+        if i + pausa < len(lineas):
+            try:
+                if input().strip().lower() == "q":
+                    break
+            except (EOFError, KeyboardInterrupt):
+                break
 
 
-def main() -> int:
-    # Una tubería de Windows puede seleccionar cp1252 aunque la terminal use UTF-8.
+def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    parser = argparse.ArgumentParser(
-        description="Convierte expresiones regulares infix a postfix con Shunting Yard."
-    )
+    parser = argparse.ArgumentParser(description="Convierte regex infix a postfix.")
     parser.add_argument(
-        "archivo",
-        nargs="?",
-        type=Path,
-        default=Path(__file__).with_name("expresiones.txt"),
-        help="archivo de entrada (por defecto: expresiones.txt)",
+        "archivo", nargs="?", type=Path, default=Path(__file__).with_name("expresiones.txt")
     )
-    modos_pausa = parser.add_mutually_exclusive_group()
-    modos_pausa.add_argument(
-        "--pausar",
-        action="store_true",
-        help="pausa el reporte cada 20 líneas para facilitar la demostración",
+    modo = parser.add_mutually_exclusive_group()
+    modo.add_argument("--pausar", action="store_true", help="pausa cada 20 líneas")
+    modo.add_argument(
+        "--paso-a-paso", action="store_true", help="pausa después de cada línea"
     )
-    modos_pausa.add_argument(
-        "--paso-a-paso",
-        action="store_true",
-        help="pausa después de cada línea del reporte",
-    )
-    argumentos = parser.parse_args()
+    args = parser.parse_args()
 
     try:
-        lineas = argumentos.archivo.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        parser.error(f"no se encontró el archivo: {argumentos.archivo}")
+        lineas = args.archivo.read_text(encoding="utf-8").splitlines()
     except OSError as error:
-        parser.error(f"no se pudo leer el archivo: {error}")
+        parser.error(str(error))
 
-    reporte, hubo_error = procesar_lineas(lineas)
-    pausar = argumentos.pausar or argumentos.paso_a_paso
-    lineas_por_pagina = 1 if argumentos.paso_a_paso else 20
-    imprimir_reporte(reporte, pausar, lineas_por_pagina)
-    return 1 if hubo_error else 0
+    reporte, error = crear_reporte(lineas)
+    imprimir(reporte, 1 if args.paso_a_paso else 20 if args.pausar else 0)
+    return int(error)
 
 
 if __name__ == "__main__":
